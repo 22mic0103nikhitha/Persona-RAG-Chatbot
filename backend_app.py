@@ -153,9 +153,9 @@ Develop auto-knowledge updating from ongoing chats.
 Enable multi-persona collaboration and real-time analytics dashboard.
 
 🧾 Author
-Krishna Koushik
+Y Sai Sree Nikhitha
 Integrated M.Tech, Computer Science
-📧 Email: krishnakoushik@example.com
+📧 Email: srijanvi24@example.com
 🏫 University: vellore institute of technology
 
 📚 License
