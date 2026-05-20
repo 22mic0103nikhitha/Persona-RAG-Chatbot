@@ -1,6 +1,6 @@
 # 🧠 Persona RAG Chatbot  
 ### A Retrieval-Augmented Generation-based Personalized Memory Chatbot  
-Developed by: **Krishna Koushik**
+
 
 ---
 
