@@ -1,176 +1,235 @@
-# 🧠 Persona RAG Chatbot  
-### A Retrieval-Augmented Generation-based Personalized Memory Chatbot  
-Developed by: **Y SAI SREE NIKHITHA**
+"""
+FastAPI backend for PersonaRAGSystem.
 
----
+Dependencies:
+ pip install fastapi uvicorn sentence-transformers chromadb gpt4all numpy regex
 
-## 📘 Overview  
-The **Persona RAG Chatbot** is an intelligent conversational system that combines **Retrieval-Augmented Generation (RAG)** with personalized knowledge retention.  
-It allows users to create AI personas capable of remembering information, managing personal knowledge bases, and generating context-aware responses through a reinforcement-based feedback loop.
+Run:
+ uvicorn persona_rag_backend:app --reload --port 8000
+"""
 
----
+import os
+import re
+import logging
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Dict, Any
 
-## ⚙️ Features  
-- 🧩 **Persona-based Memory:** Each persona retains past knowledge and responses.  
-- 🔍 **RAG Integration:** Dynamic retrieval of stored knowledge for relevant answers.  
-- 🧠 **Reward Feedback System:** User satisfaction feedback updates response scoring.  
-- 🔐 **Privacy-focused Design:** Knowledge stored locally with user-level control.  
-- 💬 **Interactive Web UI:** Built using HTML, CSS, and JavaScript.  
-- 🚀 **FastAPI Backend:** Handles persona initialization, chat generation, and knowledge management.
+from rag_system import PersonaRAGSystem  # Your class file
+from config import settings  # Your settings file
 
----
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-## 🧰 Dependencies  
+# -----------------------
+# FastAPI setup
+# -----------------------
+app = FastAPI(title="Persona RAG Backend")
 
-Before running the project, ensure the following dependencies are installed:
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Restrict in production
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-### 🐍 Python Requirements  
-Install using:
-```bash
-pip install fastapi uvicorn sentence-transformers chromadb gpt4all numpy regex pydantic
-💻 Frontend Requirements
-No external dependencies — the frontend is pure HTML, CSS, and JavaScript.
-Ensure a modern browser (Chrome/Edge/Firefox) is used.
+# Store PersonaRAGSystem instances in memory per persona_id
+persona_systems: Dict[int, PersonaRAGSystem] = {}
 
-🧩 Folder Structure
-graphql
-Copy code
-Persona-RAG-Chatbot/
-│
-├── backend_app.py           # FastAPI backend (main server)
-├── rag_system.py            # Core PersonaRAGSystem logic
-├── config.py                # Configuration and environment settings
-├── static/
-│   ├── index.html           # Frontend chat UI
-│   └── assets/              # Optional images, icons, CSS
-│
-├── persona_memory/          # Stores ChromaDB vector embeddings
-├── models/                  # GPT4All / SentenceTransformer models
-├── README.md                # Project documentation (this file)
-└── requirements.txt         # Python dependencies
-⚡ Setup Instructions
-Step 1️⃣ — Clone or Extract the Project
-If you downloaded a ZIP, extract it to your workspace.
-Or clone via:
 
-bash
-Copy code
-git clone https://github.com/koushik4477/ragbot.git
-Step 2️⃣ — Install Dependencies
-In your terminal:
+# -----------------------
+# Text cleaning function
+# -----------------------
+def clean_response_text(text: str) -> str:
+    """
+    Removes reasoning, hashtags, emojis, URLs, and unwanted symbols from model responses.
+    Keeps only relevant human-readable answer text.
+    """
+    if not text:
+        return ""
 
-bash
-Copy code
-pip install -r requirements.txt
-Step 3️⃣ — Run the Backend Server
-Launch the FastAPI server with:
+    # Remove URLs and handles
+    text = re.sub(r"http\S+|pic\.twitter\.com\S+|@\S+", "", text)
 
-bash
-Copy code
-uvicorn backend_app:app --reload --port 8000
-You should see logs similar to:
+    # Remove hashtags and emojis (non-ASCII)
+    text = re.sub(r"#\S+", "", text)
+    text = re.sub(r"[^\x00-\x7F]+", "", text)
 
-pgsql
-Copy code
-INFO:     Started server process [12345]
-INFO:     Application startup complete.
-Step 4️⃣ — Open the Frontend
-Simply open index.html (inside static/) in your browser.
-The chatbot UI should appear with:
+    # Remove 'Reasoning:' and any explanation after it
+    text = re.sub(r"Reasoning:.*", "", text, flags=re.DOTALL)
 
-Persona initialization panel
+    # Remove leftover control markers like <|end|> or <|assistant|>
+    text = re.sub(r"<\|.*?\|>", "", text)
 
-Knowledge management sidebar
+    # Clean extra whitespace
+    text = re.sub(r"\s+", " ", text).strip()
 
-Chat area for user interaction
+    # Remove redundant prefixes
+    if text.lower().startswith("assistant:"):
+        text = text.split(":", 1)[1].strip()
 
-💬 Usage Workflow
-Initialize Persona:
+    # Keep only the first concise sentence if it’s too long
+    if len(text.split(".")) > 3:
+        text = ".".join(text.split(".")[:2]).strip() + "."
 
-Enter a persona ID (default: 1) and click Initialize Persona.
+    return text
 
-Add Knowledge:
 
-Input any fact or statement (e.g., “Krishna knows Python and Java”) and assign a category (e.g., personal, career).
+# -----------------------
+# Pydantic request models
+# -----------------------
+class KnowledgeIn(BaseModel):
+    text: str
+    metadata: Dict[str, Any] = {}
 
-Click Add to store it in the vector database.
+class ChatIn(BaseModel):
+    query: str
+    conversation_mode: str = "casual"
+    relevance_threshold: float = 0.2
 
-Start Chatting:
+class FeedbackIn(BaseModel):
+    query: str
+    response: str
+    score: float
 
-Enter any question related to stored knowledge or general queries.
 
-The chatbot retrieves relevant data and generates a personalized response.
+# -----------------------
+# Endpoints
+# -----------------------
+@app.post("/persona/{persona_id}/init")
+def init_persona(persona_id: int):
+    if persona_id not in persona_systems:
+        persona_systems[persona_id] = PersonaRAGSystem(persona_id)
+        logger.info(f"Initialized PersonaRAGSystem for persona {persona_id}")
+    return {"ok": True, "persona_id": persona_id}
 
-Provide Feedback:
 
-After each response, use the feedback button (👍 / 👎) to update reward metrics.
+@app.post("/persona/{persona_id}/knowledge/add")
+def add_knowledge(persona_id: int, body: KnowledgeIn):
+    if persona_id not in persona_systems:
+        raise HTTPException(status_code=404, detail="Persona not initialized")
+    doc_id = persona_systems[persona_id].add_knowledge(body.text, body.metadata)
+    return {"ok": True, "doc_id": doc_id}
 
-Delete Knowledge:
 
-Remove specific knowledge entries from memory directly in the sidebar.
+@app.post("/persona/{persona_id}/chat")
+def chat(persona_id: int, body: ChatIn):
+    if persona_id not in persona_systems:
+        raise HTTPException(status_code=404, detail="Persona not initialized")
 
-📊 Evaluation Metrics
-The system performance was measured based on:
+    result = persona_systems[persona_id].generate_response(
+        body.query,
+        conversation_mode=body.conversation_mode,
+        relevance_threshold=body.relevance_threshold
+    )
 
-Average Relevance Score: 0.71
+    # Clean AI response text before returning
+    if "response" in result:
+        result["response"] = clean_response_text(result["response"])
 
-Precision: 0.78
+    return result
 
-Recall: 0.72
+# -----------------------
+# Feedback endpoint (Reward-based only)
+# -----------------------
+feedback_counts: Dict[int, Dict[str, int]] = {}  # Store reward counts per persona
 
-F1 Score: 0.75
 
-Response Latency: ~1.8s
+@app.post("/persona/{persona_id}/feedback")
+def feedback(persona_id: int, body: FeedbackIn):
+    """
+    Reward-based feedback system.
+    Simply counts the number of positive and negative rewards for each persona.
+    """
+    if persona_id not in persona_systems:
+        raise HTTPException(status_code=404, detail="Persona not initialized")
 
-Knowledge Retrieval Accuracy: 94%
+    if persona_id not in feedback_counts:
+        feedback_counts[persona_id] = {"likes": 0, "dislikes": 0}
 
-Instruction Compliance Rate: 96%
+    # Reward logic: +1 for positive, +1 dislike for negative
+    if body.score > 0:
+        feedback_counts[persona_id]["likes"] += 1
+    else:
+        feedback_counts[persona_id]["dislikes"] += 1
 
-🧪 Test Case Example
-Test ID	Input	Expected Output	Chatbot Response
-T1	What programming languages does Krishna know?	Retrieve stored language data.	Krishna knows Python, Java, C, and C++.
-T2	Add new knowledge entry	Knowledge added successfully.	Added knowledge successfully.
-T3	Delete knowledge index 2	Data removed.	Knowledge deleted 🗑️ from store.
+    logger.info(
+        f"Feedback for Persona {persona_id}: 👍={feedback_counts[persona_id]['likes']} 👎={feedback_counts[persona_id]['dislikes']}"
+    )
 
-🧱 Challenges Faced
-The 1B-parameter local model produced noisy or verbose responses without fine-tuning.
+    return {
+        "ok": True,
+        "persona_id": persona_id,
+        "feedback_summary": feedback_counts[persona_id],
+        "message": "Feedback recorded (reward-based only, no learning applied)."
+    }
+@app.get("/persona/{persona_id}/feedback/stats")
+def get_feedback_stats(persona_id: int):
+    """
+    Retrieve total likes/dislikes for this persona.
+    """
+    if persona_id not in feedback_counts:
+        return {"persona_id": persona_id, "likes": 0, "dislikes": 0}
+    return {"persona_id": persona_id, **feedback_counts[persona_id]}
 
-Differentiating factual retrieval from generative text required additional output cleaning.
+@app.post("/persona/{persona_id}/feedback")
+def feedback(persona_id: int, body: FeedbackIn):
+    if persona_id not in persona_systems:
+        raise HTTPException(status_code=404, detail="Persona not initialized")
+    feedback_data = persona_systems[persona_id].update_from_feedback(
+        body.query, body.response, body.score
+    )
+    return {"ok": True, "feedback": feedback_data}
 
-Embedding retrieval speed was constrained by hardware limitations (CPU-based ChromaDB).
 
-Managing persona-specific privacy layers needed extra data validation.
+@app.get("/persona/{persona_id}/knowledge_gaps")
+def knowledge_gaps(persona_id: int):
+    if persona_id not in persona_systems:
+        raise HTTPException(status_code=404, detail="Persona not initialized")
+    gaps = persona_systems[persona_id].get_knowledge_gaps()
+    return {"gaps": gaps}
 
-🚀 Future Enhancements
-Add support for speech and multimodal inputs.
+@app.get("/persona/{persona_id}/knowledge")
+def get_all_knowledge(persona_id: int):
+    """
+    Get all stored knowledge items for the given persona.
+    """
+    if persona_id not in persona_systems:
+        raise HTTPException(status_code=404, detail="Persona not initialized")
+    
+    knowledge_list = persona_systems[persona_id].get_all_knowledge()
+    return {"persona_id": persona_id, "knowledge": knowledge_list}
 
-Implement federated vector storage for privacy-preserving retrieval.
+@app.get("/persona/{persona_id}/export")
+def export_knowledge(persona_id: int):
+    if persona_id not in persona_systems:
+        raise HTTPException(status_code=404, detail="Persona not initialized")
+    data = persona_systems[persona_id].export_knowledge()
+    return data
 
-Integrate fine-tuned transformer models for cleaner generation.
 
-Develop auto-knowledge updating from ongoing chats.
+@app.post("/persona/{persona_id}/import")
+def import_knowledge(persona_id: int, knowledge_data: Dict[str, Any]):
+    if persona_id not in persona_systems:
+        persona_systems[persona_id] = PersonaRAGSystem(persona_id)
+    persona_systems[persona_id].import_knowledge(knowledge_data)
+    return {"ok": True}
 
-Enable multi-persona collaboration and real-time analytics dashboard.
+@app.delete("/persona/{persona_id}/knowledge/{index}")
+def delete_knowledge(persona_id: int, index: int):
+    """
+    Delete a specific knowledge entry by index.
+    """
+    if persona_id not in persona_systems:
+        raise HTTPException(status_code=404, detail="Persona not initialized")
 
-🧾 Author
-Y Sai Sree Nikhitha
-Integrated M.Tech, Computer Science
-📧 Email: srijanvi24@example.com
-🏫 University: vellore institute of technology
+    success = persona_systems[persona_id].delete_knowledge(index)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Knowledge index {index} not found")
 
-📚 License
-This project is licensed under the MIT License.
-You are free to modify, distribute, and use it for educational or research purposes.
+    return {"ok": True, "deleted_index": index}
 
-✅ Quick Start Summary
-bash
-Copy code
-# 1. Install dependencies
-pip install -r requirements.txt
-
-# 2. Run backend
-uvicorn backend_app:app --reload --port 8000
-
-# 3. Open frontend
-static/index.html  # Open in browser
-🎯 Ready! Your Persona RAG chatbot is now live and learning.
+@app.get("/health")
+def health():
+    return {"status": "ok"}
